@@ -1,0 +1,383 @@
+<!-- scanner.html -->
+<!doctype html>
+<html lang="ru">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Сканер — Чек</title>
+    <style>
+        :root {
+            --accent: #16a34a;
+            --muted: #6b7280;
+            --danger: #dc2626
+        }
+
+        body {
+            font-family: Inter, system-ui, Arial;
+            margin: 0;
+            background: #f6f7fb;
+            color: #111;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh
+        }
+
+        .app {
+            width: 100%;
+            max-width: 420px;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 8px 30px rgba(2, 6, 23, .08);
+            padding: 16px
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px
+        }
+
+        .logo {
+            width: 44px;
+            height: 44;
+            border-radius: 10px;
+            background: linear-gradient(135deg, var(--accent), #059669);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-weight: 700
+        }
+
+        h1 {
+            font-size: 18px;
+            margin: 0
+        }
+
+        #reader {
+            width: 100%;
+            height: 360px;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff
+        }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+            justify-content: center
+        }
+
+        button {
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 0;
+            background: #111;
+            color: #fff;
+            cursor: pointer
+        }
+
+        .btn-soft {
+            background: #e6e6e6;
+            color: #111
+        }
+
+        .result {
+            margin-top: 12px;
+            padding: 12px;
+            border-radius: 10px;
+            background: #f8fafc
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 6px 8px;
+            border-radius: 999px;
+            background: #fff;
+            border: 1px solid rgba(0, 0, 0, .06);
+            font-size: 13px
+        }
+
+        .danger {
+            color: var(--danger);
+            font-weight: 700
+        }
+
+        .good {
+            color: var(--accent);
+            font-weight: 700
+        }
+
+        pre {
+            white-space: pre-wrap;
+            font-family: inherit
+        }
+    </style>
+    <!-- html5-qrcode from unpkg (stable) -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js" defer></script>
+</head>
+
+<body>
+    <div class="app">
+        <div class="header">
+            <div class="logo">Ч</div>
+            <div>
+                <h1>Чек — сканер</h1>
+                <div style="color:var(--muted);font-size:13px">QR + штрих-коды</div>
+            </div>
+        </div>
+
+        <div id="reader">Камера не запущена</div>
+
+        <div class="controls">
+            <button id="startBtn">Запустить камеру</button>
+            <button id="stopBtn" class="btn-soft">Остановить</button>
+            <button id="flipBtn" class="btn-soft">Сменить камеру</button>
+        </div>
+
+        <div id="status" style="margin-top:8px;color:var(--muted);font-size:13px">Статус: готов</div>
+
+        <div id="output" class="result" style="display:none">
+            <div id="summary"></div>
+            <hr />
+            <div id="details"></div>
+        </div>
+    </div>
+
+    <script>
+        /*
+          Работает так:
+          - html5-qrcode сканирует код
+          - onScanSuccess вызывается с decodedText
+          - вызывается fetchProduct(barcode) -> сначала OpenFoodFacts, потом BarcodeLookup (если задан API_KEY)
+        */
+
+        const readerId = "reader";
+        const html5QrCode = new Html5Qrcode(readerId, /* verbose= */ false);
+
+        let cameraId = null;
+        let useBack = true;
+        let isScanning = false;
+
+        // Replace with your BarcodeLookup API key if you want fallback commercial DB
+        const BARCODELOOKUP_API_KEY = ""; // <-- поставь ключ если есть
+
+        // Полезные вспомогательные словари (аллергены)
+        const ALLERGEN_KEYWORDS = ['milk', 'milk powder', 'lactose', 'soy', 'soybean', 'peanut', 'peanuts', 'tree nut', 'almond', 'walnut', 'hazelnut', 'egg', 'fish', 'shellfish', 'gluten', 'wheat'];
+
+        // Humanize basic ingredient names
+        function humanize(text) {
+            if (!text) return '';
+            return text
+                .replace(/lactose/gi, 'молочный сахар')
+                .replace(/soy lecithin/gi, 'соевый лецитин')
+                .replace(/\bsoy\b/gi, 'соя')
+                .replace(/\bmilk\b/gi, 'молоко')
+                .replace(/\bnut(s)?\b/gi, 'орех(и)')
+                .replace(/\bgluten\b/gi, 'глютен');
+        }
+
+        // Показ результата
+        function showResult(product, source) {
+            const out = document.getElementById('output');
+            out.style.display = 'block';
+            const summary = document.getElementById('summary');
+            const details = document.getElementById('details');
+
+            if (!product) {
+                summary.innerHTML = '<div class="badge">Продукт не найден</div><div style="margin-top:8px;color:var(--muted)">Можно добавить вручную</div>';
+                details.innerHTML = '';
+                return;
+            }
+
+            const title = product.product_name || product.product || product.title || 'Неизвестный продукт';
+            const brand = (product.brands || product.brand || product.manufacturer || '').split(',')[0] || '—';
+            summary.innerHTML = `<div style="font-weight:700">${title}</div><div style="color:var(--muted);font-size:13px">Бренд: ${brand} • источник: ${source}</div>`;
+
+            // Ingredients (attempt)
+            let ingredients = product.ingredients_text || product.ingredients_string || product.ingredients || '';
+            if (Array.isArray(ingredients)) ingredients = ingredients.join(', ');
+            ingredients = humanize(ingredients);
+
+            // Simple allergen detection
+            const foundAllergens = [];
+            const lc = (ingredients || '').toLowerCase();
+            ALLERGEN_KEYWORDS.forEach(k => {
+                if (lc.indexOf(k) !== -1 && !foundAllergens.includes(k)) foundAllergens.push(k);
+            });
+
+            let healthHtml = '';
+            if (foundAllergens.length) {
+                healthHtml = `<div class="danger">Возможные аллергены: ${foundAllergens.join(', ')}</div>`;
+            } else {
+                healthHtml = `<div class="good">Явных аллергенов не обнаружено (проверьте список ингредиентов)</div>`;
+            }
+
+            details.innerHTML = `
+    <div style="margin-top:8px"><strong>Состав (кратко):</strong><div style="margin-top:6px">${ingredients || '<span style="color:var(--muted)">нет данных</span>'}</div></div>
+    <div style="margin-top:8px"><strong>О бренде:</strong><div style="margin-top:6px">${product.brands_tags ? product.brands_tags.join(', ') : (product.brand || 'нет данных')}</div></div>
+    <div style="margin-top:10px">${healthHtml}</div>
+    <div style="margin-top:10px"><button id="addManual" class="btn-soft">Добавить / сообщить</button></div>
+    <pre style="margin-top:10px;font-size:13px;color:var(--muted)">Полные данные (raw): ${JSON.stringify(product, null, 2)}</pre>
+  `;
+
+            document.getElementById('addManual').addEventListener('click', () => {
+                alert('Открыть форму добавления продукта (пока заглушка).');
+            });
+        }
+
+        // Запрос в OpenFoodFacts (бесплатно)
+        async function fetchOpenFoodFacts(barcode) {
+            try {
+                const url = `https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(barcode)}.json`;
+                const res = await fetch(url);
+                if (!res.ok) return null;
+                const j = await res.json();
+                if (j.status === 1) return j.product;
+                return null;
+            } catch (e) {
+                console.error('OFF error', e);
+                return null;
+            }
+        }
+
+        // Запрос в BarcodeLookup (платно) - fallback
+        async function fetchBarcodeLookup(barcode) {
+            if (!BARCODELOOKUP_API_KEY) return null;
+            try {
+                const url = `https://api.barcodelookup.com/v3/products?barcode=${encodeURIComponent(barcode)}&key=${encodeURIComponent(BARCODELOOKUP_API_KEY)}`;
+                const res = await fetch(url);
+                if (!res.ok) return null;
+                const j = await res.json();
+                if (j && j.products && j.products.length) return j.products[0];
+                return null;
+            } catch (e) {
+                console.error('BarcodeLookup error', e);
+                return null;
+            }
+        }
+
+        // Основная функция: по коду ищем продукт
+        async function fetchProduct(barcode) {
+            document.getElementById('status').textContent = 'Статус: ищем продукт в OpenFoodFacts...';
+            let p = await fetchOpenFoodFacts(barcode);
+            if (p) {
+                showResult(p, 'OpenFoodFacts');
+                document.getElementById('status').textContent = 'Статус: найден в OpenFoodFacts';
+                return;
+            }
+            document.getElementById('status').textContent = 'Статус: не найден в OFF — пробуем коммерческую базу...';
+            p = await fetchBarcodeLookup(barcode);
+            if (p) {
+                showResult(p, 'BarcodeLookup');
+                document.getElementById('status').textContent = 'Статус: найден в BarcodeLookup';
+                return;
+            }
+            showResult(null, 'none');
+            document.getElementById('status').textContent = 'Статус: продукт не найден';
+        }
+
+        // Обработка скана
+        function onScanSuccess(decodedText, decodedResult) {
+            // decodedText может быть URL (QR) или цифрами (штрих)
+            console.log('decodedText', decodedText);
+            // Если это URL — просто покажем и не делаем lookup
+            if (/^https?:\/\//i.test(decodedText)) {
+                document.getElementById('status').textContent = 'Статус: QR содержит ссылку';
+                showResult({ product_name: decodedText }, 'QR link');
+                // остановим сканер
+                html5QrCode.stop().catch(() => { });
+                isScanning = false;
+                return;
+            }
+
+            // Ожидаем, что для штрихкода — digits
+            const digits = decodedText.replace(/\D/g, '');
+            if (digits.length >= 8) {
+                // нашли штрихкод
+                fetchProduct(digits);
+                // можно временно остановить сканер на 3 секунды
+                if (isScanning) {
+                    html5QrCode.pause(); // временная пауза (в библиотеке есть методы start/stop/pause?)
+                    setTimeout(() => { html5QrCode.resume(); }, 3000);
+                }
+            } else {
+                // простой QR-текст
+                showResult({ product_name: decodedText }, 'QR text');
+            }
+        }
+
+        // Ошибка
+        function onScanFailure(error) {
+            // можно логировать, но не мешать UX
+            //console.warn(`scan failed: ${error}`);
+        }
+
+        // Запустить камеру по умолчанию (back)
+        async function startScanner() {
+            document.getElementById('status').textContent = 'Статус: включение камеры...';
+            try {
+                // Подбор камеры: выбираем первое устройство с 'back' в label, иначе первый
+                const devices = await Html5Qrcode.getCameras();
+                console.log('devices', devices);
+                if (!devices || !devices.length) throw new Error('Камера не найдена');
+                // выбираем камеру
+                let chosen = devices.find(d => /back|rear|wide/i.test(d.label)) || devices[0];
+                cameraId = chosen.id;
+                await html5QrCode.start(
+                    { deviceId: { exact: cameraId } },
+                    {
+                        fps: 10, qrbox: { width: 300, height: 300 }, formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE,
+                        Html5QrcodeSupportedFormats.EAN_13,
+                        Html5QrcodeSupportedFormats.EAN_8,
+                        Html5QrcodeSupportedFormats.UPC_A,
+                        Html5QrcodeSupportedFormats.UPC_E,
+                        Html5QrcodeSupportedFormats.CODE_128,
+                        Html5QrcodeSupportedFormats.CODE_39
+                        ]
+                    },
+                    onScanSuccess,
+                    onScanFailure
+                );
+                isScanning = true;
+                document.getElementById('status').textContent = 'Статус: сканер запущен';
+            } catch (err) {
+                console.error(err);
+                document.getElementById('status').textContent = 'Ошибка: ' + (err.message || err);
+            }
+        }
+
+        document.getElementById('startBtn').addEventListener('click', () => startScanner());
+        document.getElementById('stopBtn').addEventListener('click', () => {
+            if (isScanning) {
+                html5QrCode.stop().then(() => { document.getElementById('status').textContent = 'Статус: остановлен'; isScanning = false; }).catch(e => console.error(e));
+            }
+        });
+        document.getElementById('flipBtn').addEventListener('click', async () => {
+            // try to flip: pick next camera
+            try {
+                const devices = await Html5Qrcode.getCameras();
+                if (!devices || devices.length <= 1) return alert('Нет второй камеры');
+                const idx = devices.findIndex(d => d.id === cameraId);
+                const next = devices[(idx + 1) % devices.length];
+                cameraId = next.id;
+                if (isScanning) {
+                    await html5QrCode.stop();
+                    await html5QrCode.start({ deviceId: { exact: cameraId } }, { fps: 10, qrbox: { width: 300, height: 300 } }, onScanSuccess, onScanFailure);
+                } else {
+                    // just set cameraId for next start
+                }
+            } catch (e) { console.error(e) }
+        });
+    </script>
+</body>
+
+</html>
